@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RC Sky Garden</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+      <div class="hud">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <span>RC Sky Garden</span>
+        </div>
+        <div class="flight-readout">
+          <div>
+            <span class="readout-label">Stars</span>
+            <strong id="starCount">0</strong>
+          </div>
+          <div>
+            <span class="readout-label">Sky</span>
+            <strong id="altitude">0</strong>
+          </div>
+        </div>
+        <div class="state-badge" id="stateBadge">Ready</div>
+        <section class="remote-control" id="remoteControl" aria-label="RC controller">
+          <div class="remote-antenna" aria-hidden="true"></div>
+          <span class="screw screw-top-left" aria-hidden="true"></span>
+          <span class="screw screw-top-right" aria-hidden="true"></span>
+          <span class="screw screw-bottom-left" aria-hidden="true"></span>
+          <span class="screw screw-bottom-right" aria-hidden="true"></span>
+
+          <div class="direction-pad" aria-label="Flight direction buttons">
+            <button class="remote-button direction-button direction-up" data-control="up" aria-label="Climb">
+              <span class="arrow arrow-up" aria-hidden="true"></span>
+            </button>
+            <button class="remote-button direction-button direction-left" data-control="left" aria-label="Turn left">
+              <span class="arrow arrow-left" aria-hidden="true"></span>
+            </button>
+            <div class="pad-center" aria-hidden="true"></div>
+            <button class="remote-button direction-button direction-right" data-control="right" aria-label="Turn right">
+              <span class="arrow arrow-right" aria-hidden="true"></span>
+            </button>
+            <button class="remote-button direction-button direction-down" data-control="down" aria-label="Descend">
+              <span class="arrow arrow-down" aria-hidden="true"></span>
+            </button>
+          </div>
+
+          <div class="remote-display" aria-label="Controller display">
+            <div class="screen-title">RC LINK</div>
+            <div class="launch-meter">
+              <span id="launchFill"></span>
+            </div>
+            <div class="battery-stack">
+              <div class="battery-row">
+                <span>PLANE</span>
+                <div class="battery-shell">
+                  <span id="planeBatteryFill"></span>
+                </div>
+                <strong id="planeBatteryText">100%</strong>
+              </div>
+              <div class="battery-row">
+                <span>REMOTE</span>
+                <div class="battery-shell">
+                  <span id="remoteBatteryFill"></span>
+                </div>
+                <strong id="remoteBatteryText">100%</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="system-controls">
+            <button class="remote-button system-button takeoff-button" id="flightButton" aria-label="Take off">
+              TAKE OFF
+            </button>
+            <button class="remote-button system-button gear-button" id="gearButton" aria-label="Toggle landing gear">
+              GEAR DOWN
+            </button>
+          </div>
+
+          <div class="throttle-control">
+            <label for="throttleControl">SPEED</label>
+            <button class="remote-button speed-button" id="speedUpButton" aria-label="Increase speed">+</button>
+            <input id="throttleControl" type="range" min="0" max="100" value="58" />
+            <button class="remote-button speed-button" id="speedDownButton" aria-label="Decrease speed">-</button>
+            <strong id="speedValue">58%</strong>
+          </div>
+        </section>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

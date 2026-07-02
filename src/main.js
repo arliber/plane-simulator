@@ -14,6 +14,8 @@ const launchFill = document.querySelector("#launchFill");
 const stateBadge = document.querySelector("#stateBadge");
 const starCount = document.querySelector("#starCount");
 const altitudeLabel = document.querySelector("#altitude");
+const planeSpeedLabel = document.querySelector("#planeSpeed");
+const speedNeedle = document.querySelector("#speedNeedle");
 const flightButton = document.querySelector("#flightButton");
 const gearButton = document.querySelector("#gearButton");
 const throttleControl = document.querySelector("#throttleControl");
@@ -1186,6 +1188,9 @@ function updateGear(dt) {
 
 function updateRemoteUI() {
   speedValue.textContent = formatPercent(controls.throttle * 100);
+  planeSpeedLabel.textContent = Math.round(state.speed).toString();
+  const speedPercent = THREE.MathUtils.clamp(state.speed / flight.maxSpeed, 0, 1);
+  speedNeedle.style.setProperty("--speed-angle", `${-118 + speedPercent * 236}deg`);
   setBatteryDisplay(planeBatteryFill, planeBatteryText, state.planeBattery);
   setBatteryDisplay(remoteBatteryFill, remoteBatteryText, state.remoteBattery);
 

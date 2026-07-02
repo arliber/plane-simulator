@@ -22,6 +22,14 @@
             <span class="readout-label">Sky</span>
             <strong id="altitude">0</strong>
           </div>
+          <div class="speedometer" aria-label="Plane speed">
+            <span class="readout-label">Speed</span>
+            <div class="speedometer-face" aria-hidden="true">
+              <span class="speedometer-needle" id="speedNeedle"></span>
+              <span class="speedometer-pin"></span>
+            </div>
+            <strong><span id="planeSpeed">0</span><span class="speed-unit"> kt</span></strong>
+          </div>
         </div>
         <div class="state-badge" id="stateBadge">Ready</div>
         <section class="remote-control" id="remoteControl" aria-label="RC controller">

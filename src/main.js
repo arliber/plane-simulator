@@ -7,6 +7,18 @@ import {
   isLowBatteryWarning,
   shouldFlipFromEmptyBattery,
 } from "./flightModel.js";
+import {
+  getCloudClearRadioLine,
+  getCloudHoldRadioLine,
+  getCrashRadioLine,
+  getLandingRadioLine,
+  getLowBatteryRadioLine,
+  getTakeoffAckRadioLine,
+  getTakeoffRadioLine,
+  getTurnRadioLine,
+  hasRunwayClouds,
+  shouldHoldForClouds,
+} from "./radioModel.js";
 import "./style.css";
 
 const canvas = document.querySelector("#game");
@@ -26,6 +38,10 @@ const planeBatteryFill = document.querySelector("#planeBatteryFill");
 const remoteBatteryFill = document.querySelector("#remoteBatteryFill");
 const planeBatteryText = document.querySelector("#planeBatteryText");
 const remoteBatteryText = document.querySelector("#remoteBatteryText");
+const towerRadio = document.querySelector("#towerRadio");
+const radioSpeaker = document.querySelector("#radioSpeaker");
+const radioMessage = document.querySelector("#radioMessage");
+const radioStatus = document.querySelector("#radioStatus");
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -126,6 +142,15 @@ const audioState = {
   unlocked: false,
 };
 
+const radioState = {
+  activeUntil: 0,
+  cloudHoldActive: false,
+  lastCloudAt: -10,
+  lastTurnAt: -10,
+  lastTurnControl: null,
+  lastBatteryAt: -10,
+};
+
 const colors = {
   coral: 0xff6f61,
   yellow: 0xffcf4a,
@@ -218,6 +243,71 @@ function triggerWarningBeep() {
   oscillator.stop(context.currentTime + 0.17);
 }
 
+function triggerRadioChirp() {
+  const context = audioState.context;
+  if (!context || !audioState.masterGain) return;
+
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  const filter = context.createBiquadFilter();
+  const now = context.currentTime;
+  oscillator.type = "square";
+  oscillator.frequency.setValueAtTime(860, now);
+  oscillator.frequency.exponentialRampToValueAtTime(430, now + 0.08);
+  filter.type = "bandpass";
+  filter.frequency.value = 1200;
+  filter.Q.value = 4;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.12, now + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+  oscillator.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioState.masterGain);
+  oscillator.start(now);
+  oscillator.stop(now + 0.13);
+}
+
+function speakRadioLine(line) {
+  if (
+    !audioState.unlocked ||
+    !window.speechSynthesis ||
+    !window.SpeechSynthesisUtterance
+  ) {
+    return;
+  }
+
+  const utterance = new window.SpeechSynthesisUtterance(
+    `${line.speaker}. ${line.message}`,
+  );
+  utterance.lang = "he-IL";
+  utterance.rate = 0.95;
+  utterance.pitch = line.speaker === "מגדל" ? 0.9 : 1.04;
+  utterance.volume = 0.88;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+function transmitRadio(line, options = {}) {
+  if (!line || !towerRadio) return;
+
+  const elapsed = clock.elapsedTime;
+  radioSpeaker.textContent = line.speaker;
+  radioMessage.textContent = line.message;
+  radioStatus.textContent = line.status;
+  towerRadio.classList.remove(
+    "is-clear",
+    "is-hold",
+    "is-turn",
+    "is-land",
+    "is-warning",
+    "is-plane",
+  );
+  towerRadio.classList.add("is-live", `is-${line.tone}`);
+  radioState.activeUntil = elapsed + (options.duration ?? 4.6);
+  triggerRadioChirp();
+  speakRadioLine(line);
+}
+
 function updateAudio(elapsed) {
   if (!audioState.context) return;
 
@@ -286,6 +376,63 @@ function roundedBox(width, height, depth, color, radius = 0.2) {
     geometry,
     new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.02 }),
   );
+}
+
+function material(color, options = {}) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: options.roughness ?? 0.72,
+    metalness: options.metalness ?? 0.02,
+    emissive: options.emissive ?? 0x000000,
+    emissiveIntensity: options.emissiveIntensity ?? 0,
+    transparent: options.opacity !== undefined && options.opacity < 1,
+    opacity: options.opacity ?? 1,
+    side: options.side ?? THREE.FrontSide,
+  });
+}
+
+function addBox(group, width, height, depth, x, y, z, color, options = {}) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, depth),
+    material(color, options),
+  );
+  mesh.position.set(x, y, z);
+  mesh.castShadow = options.castShadow ?? true;
+  mesh.receiveShadow = options.receiveShadow ?? false;
+  group.add(mesh);
+  return mesh;
+}
+
+function addCylinder(
+  group,
+  radiusTop,
+  radiusBottom,
+  height,
+  x,
+  y,
+  z,
+  color,
+  options = {},
+) {
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(
+      radiusTop,
+      radiusBottom,
+      height,
+      options.segments ?? 18,
+    ),
+    material(color, options),
+  );
+  mesh.position.set(x, y, z);
+  mesh.rotation.set(
+    options.rotationX ?? 0,
+    options.rotationY ?? 0,
+    options.rotationZ ?? 0,
+  );
+  mesh.castShadow = options.castShadow ?? true;
+  mesh.receiveShadow = options.receiveShadow ?? false;
+  group.add(mesh);
+  return mesh;
 }
 
 function createPlane() {
@@ -478,25 +625,468 @@ function createPlane() {
 
 function createRunway() {
   const runway = new THREE.Group();
+  const asphalt = new THREE.MeshStandardMaterial({
+    color: 0x7f8b94,
+    roughness: 0.86,
+  });
   const base = new THREE.Mesh(
-    new THREE.BoxGeometry(13, 0.18, 92),
-    new THREE.MeshStandardMaterial({ color: 0x95a3ad, roughness: 0.82 }),
+    new THREE.BoxGeometry(18, 0.18, 128),
+    asphalt,
   );
   base.receiveShadow = true;
-  base.position.set(0, 0.04, -23);
+  base.position.set(0, 0.04, -38);
   runway.add(base);
+
+  addBox(runway, 2.8, 0.12, 128, -10.4, 0.05, -38, 0x6f7d80, {
+    receiveShadow: true,
+    castShadow: false,
+    roughness: 0.9,
+  });
+  addBox(runway, 2.8, 0.12, 128, 10.4, 0.05, -38, 0x6f7d80, {
+    receiveShadow: true,
+    castShadow: false,
+    roughness: 0.9,
+  });
 
   const stripeMaterial = new THREE.MeshStandardMaterial({
     color: 0xf9fbff,
     roughness: 0.72,
   });
-  for (let i = 0; i < 13; i += 1) {
-    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.04, 3.2), stripeMaterial);
-    stripe.position.set(0, 0.16, 16 - i * 6.4);
+  for (let i = 0; i < 18; i += 1) {
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.045, 3.65), stripeMaterial);
+    stripe.position.set(0, 0.16, 20 - i * 6.5);
     runway.add(stripe);
   }
 
+  for (const z of [24, -100]) {
+    for (const x of [-5.8, -3.4, -1, 1.4, 3.8, 6.2]) {
+      addBox(runway, 1.25, 0.05, 5.4, x, 0.17, z, 0xf9fbff, {
+        roughness: 0.72,
+        castShadow: false,
+      });
+    }
+  }
+
+  const edgeLightMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf7ffde,
+    roughness: 0.35,
+    emissive: 0xdfffb2,
+    emissiveIntensity: 0.45,
+  });
+  for (let i = 0; i < 21; i += 1) {
+    const z = 25 - i * 6.2;
+    for (const x of [-9.8, 9.8]) {
+      const light = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), edgeLightMaterial);
+      light.position.set(x, 0.32, z);
+      light.castShadow = false;
+      runway.add(light);
+    }
+  }
+
+  const taxiMaterial = new THREE.MeshStandardMaterial({
+    color: 0x68767d,
+    roughness: 0.88,
+  });
+  const taxiways = [
+    [30, 0.12, 6.4, 22, 0.08, -16],
+    [30, 0.12, 6.4, 22, 0.08, -58],
+    [8, 0.12, 46, 36, 0.08, -37],
+  ];
+  for (const [width, height, depth, x, y, z] of taxiways) {
+    const taxiway = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), taxiMaterial);
+    taxiway.position.set(x, y, z);
+    taxiway.receiveShadow = true;
+    runway.add(taxiway);
+
+    const centerLine = new THREE.Mesh(
+      new THREE.BoxGeometry(width > depth ? width - 3 : 0.28, 0.04, width > depth ? 0.2 : depth - 4),
+      new THREE.MeshStandardMaterial({
+        color: 0xf4c941,
+        roughness: 0.7,
+      }),
+    );
+    centerLine.position.set(x, y + 0.08, z);
+    runway.add(centerLine);
+  }
+
   return runway;
+}
+
+function createFireTruck() {
+  const truck = new THREE.Group();
+  addBox(truck, 4.5, 1.2, 1.7, 0, 0.9, 0, 0xd94638, {
+    roughness: 0.55,
+  });
+  addBox(truck, 1.45, 1.35, 1.65, -1.55, 1.15, 0, 0xf05b4e, {
+    roughness: 0.5,
+  });
+  addBox(truck, 0.12, 0.58, 1.25, -2.3, 1.32, 0, 0xa8e9ff, {
+    roughness: 0.2,
+    metalness: 0.03,
+    opacity: 0.88,
+  });
+  addBox(truck, 1.78, 0.22, 0.18, 0.52, 1.64, -0.92, 0xe9eef0, {
+    roughness: 0.45,
+    metalness: 0.12,
+  });
+  addBox(truck, 1.78, 0.22, 0.18, 0.52, 1.64, 0.92, 0xe9eef0, {
+    roughness: 0.45,
+    metalness: 0.12,
+  });
+  addBox(truck, 4.95, 0.16, 0.2, 0.12, 1.88, 0, 0xf3f6f4, {
+    roughness: 0.5,
+    metalness: 0.18,
+  });
+
+  const lightMaterial = material(0xffcf4a, {
+    roughness: 0.35,
+    emissive: 0xff8f2a,
+    emissiveIntensity: 0.35,
+  });
+  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 8), lightMaterial);
+  beacon.position.set(-1.55, 1.95, 0);
+  beacon.castShadow = false;
+  truck.add(beacon);
+
+  const wheelMaterial = material(0x1c272b, { roughness: 0.55 });
+  for (const x of [-1.65, 1.55]) {
+    for (const z of [-0.93, 0.93]) {
+      const wheel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.33, 0.33, 0.24, 18),
+        wheelMaterial,
+      );
+      wheel.rotation.x = Math.PI / 2;
+      wheel.position.set(x, 0.42, z);
+      wheel.castShadow = true;
+      truck.add(wheel);
+    }
+  }
+
+  return truck;
+}
+
+function createWindsock() {
+  const windsock = new THREE.Group();
+  addCylinder(windsock, 0.045, 0.055, 5.4, 0, 2.7, 0, 0xe6edf1, {
+    roughness: 0.45,
+    metalness: 0.25,
+    segments: 10,
+  });
+  addBox(windsock, 1.1, 0.05, 0.05, 0.48, 5.22, 0, 0xe6edf1, {
+    roughness: 0.45,
+    metalness: 0.25,
+  });
+
+  const sock = new THREE.Group();
+  sock.position.set(1.05, 5.22, 0);
+  sock.rotation.z = -Math.PI / 2;
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.32, 1.9, 18, 1, true),
+    material(0xff6f38, {
+      roughness: 0.62,
+      side: THREE.DoubleSide,
+    }),
+  );
+  cone.position.y = -0.78;
+  cone.castShadow = true;
+  sock.add(cone);
+  addBox(sock, 0.08, 0.08, 0.72, 0, -0.16, 0, 0xf8f7f0, {
+    roughness: 0.62,
+  });
+  windsock.add(sock);
+  windsock.userData.sock = sock;
+  return windsock;
+}
+
+function createAirportCampus() {
+  const airport = new THREE.Group();
+  const animated = [];
+  const pulseLights = [];
+
+  addBox(airport, 66, 0.12, 62, 48, 0.07, -43, 0xb8c2c6, {
+    castShadow: false,
+    receiveShadow: true,
+    roughness: 0.88,
+  });
+  addBox(airport, 58, 0.08, 4.8, 48, 0.16, -13, 0x3f4a4f, {
+    castShadow: false,
+    receiveShadow: true,
+    roughness: 0.82,
+  });
+  addBox(airport, 5, 0.08, 52, 75, 0.16, -38, 0x3f4a4f, {
+    castShadow: false,
+    receiveShadow: true,
+    roughness: 0.82,
+  });
+
+  for (let i = 0; i < 9; i += 1) {
+    addBox(airport, 0.22, 0.045, 13, 25 + i * 5.1, 0.19, -41, 0xf4c941, {
+      castShadow: false,
+      roughness: 0.7,
+    });
+  }
+
+  const terminal = roundedBox(24, 4.2, 10, 0xe6edf1, 0.14);
+  terminal.position.set(48, 2.1, -56);
+  terminal.castShadow = true;
+  terminal.receiveShadow = true;
+  airport.add(terminal);
+  addBox(airport, 26, 0.34, 11.6, 48, 4.45, -56, 0x53606a, {
+    roughness: 0.56,
+    metalness: 0.06,
+  });
+  addBox(airport, 22.6, 0.18, 0.45, 48, 4.74, -61.7, 0xf4c941, {
+    roughness: 0.48,
+  });
+
+  const glassMaterial = material(0x79d6ed, {
+    roughness: 0.18,
+    metalness: 0.02,
+    opacity: 0.76,
+  });
+  for (let i = 0; i < 6; i += 1) {
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.35, 1.45), glassMaterial);
+    panel.position.set(35.9, 2.65, -60.2 + i * 1.68);
+    panel.castShadow = false;
+    airport.add(panel);
+  }
+  for (let i = 0; i < 5; i += 1) {
+    addBox(airport, 2.8, 0.08, 0.14, 40 + i * 4.1, 2.68, -50.9, 0x79d6ed, {
+      roughness: 0.18,
+      opacity: 0.76,
+      castShadow: false,
+    });
+  }
+
+  addBox(airport, 8, 1.3, 1.65, 31.4, 2.2, -52, 0xd8e2e6, {
+    roughness: 0.52,
+    metalness: 0.05,
+  });
+  addBox(airport, 1.5, 0.12, 1.5, 27.3, 1.18, -52, 0xffcf4a, {
+    roughness: 0.6,
+  });
+
+  const tower = new THREE.Group();
+  tower.position.set(29, 0, -73);
+  addCylinder(tower, 0.9, 1.15, 8, 0, 4, 0, 0xcdd7db, {
+    roughness: 0.68,
+    segments: 16,
+  });
+  const cab = roundedBox(5.2, 2.25, 4.3, 0xdfe8ed, 0.12);
+  cab.position.y = 9.15;
+  cab.castShadow = true;
+  tower.add(cab);
+  addBox(tower, 5.8, 0.3, 4.85, 0, 10.47, 0, 0x424c52, {
+    roughness: 0.54,
+    metalness: 0.08,
+  });
+  addBox(tower, 5.35, 0.78, 0.12, 0, 9.22, -2.24, 0x86dcf2, {
+    roughness: 0.18,
+    opacity: 0.78,
+    castShadow: false,
+  });
+  addBox(tower, 5.35, 0.78, 0.12, 0, 9.22, 2.24, 0x86dcf2, {
+    roughness: 0.18,
+    opacity: 0.78,
+    castShadow: false,
+  });
+  addBox(tower, 0.12, 0.78, 4.35, -2.72, 9.22, 0, 0x86dcf2, {
+    roughness: 0.18,
+    opacity: 0.78,
+    castShadow: false,
+  });
+  addBox(tower, 0.12, 0.78, 4.35, 2.72, 9.22, 0, 0x86dcf2, {
+    roughness: 0.18,
+    opacity: 0.78,
+    castShadow: false,
+  });
+  addCylinder(tower, 0.055, 0.055, 2.1, 0, 11.55, 0, 0x2d3a40, {
+    roughness: 0.4,
+    metalness: 0.22,
+    segments: 10,
+  });
+
+  const radar = new THREE.Group();
+  radar.position.set(0, 12.68, 0);
+  addBox(radar, 4.3, 0.16, 0.85, 0, 0, 0, 0xdbe4e8, {
+    roughness: 0.36,
+    metalness: 0.18,
+  });
+  addCylinder(radar, 0.16, 0.22, 0.42, 0, -0.16, 0, 0x2d3a40, {
+    roughness: 0.38,
+    metalness: 0.18,
+    segments: 12,
+  });
+  tower.add(radar);
+  animated.push({ object: radar, speed: 1.6, axis: "y" });
+
+  const beacon = new THREE.Group();
+  beacon.position.set(0, 11.92, 0);
+  const beamMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffe66b,
+    transparent: true,
+    opacity: 0.28,
+    depthWrite: false,
+  });
+  for (const z of [-2.4, 2.4]) {
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 4.8), beamMaterial);
+    beam.position.z = z / 2;
+    beacon.add(beam);
+  }
+  tower.add(beacon);
+  animated.push({ object: beacon, speed: 2.6, axis: "y" });
+  airport.add(tower);
+
+  const towerLight = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 12, 8),
+    material(0xff4136, {
+      emissive: 0xff4136,
+      emissiveIntensity: 0.6,
+      roughness: 0.36,
+    }),
+  );
+  towerLight.position.set(29, 13.82, -73);
+  towerLight.castShadow = false;
+  airport.add(towerLight);
+  pulseLights.push(towerLight);
+
+  const windsock = createWindsock();
+  windsock.position.set(-14, 0, -10);
+  airport.add(windsock);
+
+  addBox(airport, 20, 0.08, 8.5, 59, 0.18, -28.5, 0x4d565a, {
+    castShadow: false,
+    receiveShadow: true,
+    roughness: 0.84,
+  });
+
+  const fireStation = new THREE.Group();
+  fireStation.position.set(59, 0, -19);
+  addBox(fireStation, 18, 5, 10.5, 0, 2.5, 0, 0xb84236, {
+    roughness: 0.62,
+  });
+  addBox(fireStation, 19.2, 0.45, 11.4, 0, 5.35, 0, 0x4d5559, {
+    roughness: 0.55,
+    metalness: 0.05,
+  });
+  addBox(fireStation, 5.4, 3.45, 0.16, -3.55, 1.95, -5.35, 0xf2f4ef, {
+    roughness: 0.58,
+  });
+  addBox(fireStation, 5.4, 3.45, 0.16, 3.55, 1.95, -5.35, 0xf2f4ef, {
+    roughness: 0.58,
+  });
+  for (const x of [-3.55, 3.55]) {
+    addBox(fireStation, 5.75, 0.16, 0.22, x, 3.65, -5.46, 0x963128, {
+      roughness: 0.55,
+    });
+    for (let i = 0; i < 4; i += 1) {
+      addBox(fireStation, 5.2, 0.06, 0.2, x, 0.82 + i * 0.72, -5.48, 0xc9d1d0, {
+        roughness: 0.52,
+        metalness: 0.08,
+      });
+    }
+  }
+  addBox(fireStation, 5.8, 0.34, 0.28, 0, 4.64, -5.58, 0xffcf4a, {
+    roughness: 0.48,
+  });
+  addCylinder(fireStation, 0.2, 0.2, 0.5, -7.4, 5.82, -4.2, 0xffcf4a, {
+    roughness: 0.35,
+    emissive: 0xff8f2a,
+    emissiveIntensity: 0.24,
+    segments: 14,
+  });
+
+  const truckOne = createFireTruck();
+  truckOne.position.set(-3.55, 0, -8.9);
+  truckOne.rotation.y = Math.PI / 2;
+  fireStation.add(truckOne);
+  const truckTwo = createFireTruck();
+  truckTwo.position.set(3.55, 0, -8.9);
+  truckTwo.rotation.y = Math.PI / 2;
+  truckTwo.scale.setScalar(0.96);
+  fireStation.add(truckTwo);
+  airport.add(fireStation);
+
+  const fuelFarm = new THREE.Group();
+  fuelFarm.position.set(72, 0, -64);
+  for (let i = 0; i < 2; i += 1) {
+    const tank = addCylinder(fuelFarm, 1.15, 1.15, 4.7, 0, 1.28, i * 3.2, 0xdbe3e6, {
+      roughness: 0.42,
+      metalness: 0.18,
+      rotationZ: Math.PI / 2,
+      segments: 24,
+    });
+    tank.receiveShadow = true;
+    addBox(fuelFarm, 4.3, 0.14, 0.28, 0, 0.3, i * 3.2 - 0.88, 0x626d73, {
+      roughness: 0.6,
+      metalness: 0.08,
+    });
+    addBox(fuelFarm, 4.3, 0.14, 0.28, 0, 0.3, i * 3.2 + 0.88, 0x626d73, {
+      roughness: 0.6,
+      metalness: 0.08,
+    });
+  }
+  addBox(fuelFarm, 7.2, 0.18, 0.18, 0, 2.72, 1.6, 0xffcf4a, {
+    roughness: 0.5,
+  });
+  airport.add(fuelFarm);
+
+  for (const [x, z] of [
+    [18, -20],
+    [18, -58],
+    [35, -13],
+    [61, -13],
+    [75, -31],
+    [75, -52],
+  ]) {
+    const lamp = new THREE.Group();
+    lamp.position.set(x, 0, z);
+    addCylinder(lamp, 0.04, 0.05, 3.4, 0, 1.7, 0, 0x3c484e, {
+      roughness: 0.46,
+      metalness: 0.18,
+      segments: 10,
+    });
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 10, 8),
+      material(0xfff1a7, {
+        emissive: 0xffdf69,
+        emissiveIntensity: 0.45,
+        roughness: 0.3,
+      }),
+    );
+    glow.position.set(0, 3.45, 0);
+    glow.castShadow = false;
+    lamp.add(glow);
+    pulseLights.push(glow);
+    airport.add(lamp);
+  }
+
+  for (const [x, z, scale] of [
+    [42, -25, 1],
+    [53, -31, 0.78],
+    [58, -46, 0.85],
+    [63, -57, 0.7],
+  ]) {
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.38 * scale, 0.9 * scale, 12),
+      material(0xff7a2f, { roughness: 0.65 }),
+    );
+    cone.position.set(x, 0.48 * scale, z);
+    cone.castShadow = true;
+    airport.add(cone);
+    addBox(airport, 0.55 * scale, 0.08, 0.55 * scale, x, 0.08, z, 0xf7f3df, {
+      roughness: 0.6,
+    });
+  }
+
+  airport.userData.animated = animated;
+  airport.userData.pulseLights = pulseLights;
+  airport.userData.windsock = windsock;
+  return airport;
+}
+
+function isAirportCampusArea(x, z) {
+  return x > 12 && x < 86 && z < 30 && z > -92;
 }
 
 function createGround() {
@@ -692,6 +1282,9 @@ scene.add(plane);
 
 world.add(createGround());
 
+const airport = createAirportCampus();
+world.add(airport);
+
 const clouds = [];
 for (let i = 0; i < 32; i += 1) {
   const x = (Math.random() - 0.5) * 230;
@@ -703,21 +1296,28 @@ for (let i = 0; i < 32; i += 1) {
 }
 
 const trees = [];
-for (let i = 0; i < 92; i += 1) {
+for (let i = 0, attempts = 0; i < 92 && attempts < 180; attempts += 1) {
   const side = Math.random() > 0.5 ? 1 : -1;
   const x = side * (14 + Math.random() * 120);
   const z = 36 - Math.random() * 420;
+  if (isAirportCampusArea(x, z)) continue;
   const tree = createTree(x, z, 0.75 + Math.random() * 1.45);
   trees.push(tree);
   world.add(tree);
+  i += 1;
 }
 
 const houseColors = [0xffc4a3, 0xa6e4ff, 0xffe785, 0xb5e7a0, 0xd1bcff];
 for (let i = 0; i < 14; i += 1) {
   const side = i % 2 === 0 ? 1 : -1;
+  const z = -24 - i * 28;
+  const x =
+    side === 1 && z > -112
+      ? 92 + Math.random() * 34
+      : side * (24 + Math.random() * 62);
   const house = createHouse(
-    side * (24 + Math.random() * 62),
-    -24 - i * 28,
+    x,
+    z,
     houseColors[i % houseColors.length],
   );
   world.add(house);
@@ -793,6 +1393,21 @@ function setDirection(control, active) {
     controls.activeDirections.delete(control);
   }
   refreshControlVector();
+
+  if (
+    active &&
+    (state.mode === FLIGHT_MODE.FLYING || state.mode === FLIGHT_MODE.LANDING) &&
+    (control === "left" || control === "right")
+  ) {
+    const elapsed = clock.elapsedTime;
+    const freshTurn =
+      radioState.lastTurnControl !== control || elapsed - radioState.lastTurnAt > 2.4;
+    if (freshTurn) {
+      transmitRadio(getTurnRadioLine(control), { duration: 3.4 });
+      radioState.lastTurnAt = elapsed;
+      radioState.lastTurnControl = control;
+    }
+  }
 }
 
 function releaseAllDirections() {
@@ -806,15 +1421,18 @@ function releaseAllDirections() {
 function toggleFlightMode() {
   ensureAudio();
   if (state.mode === FLIGHT_MODE.READY && state.planeBattery > 4) {
+    transmitRadio(getTakeoffRadioLine({ runwayCloudy: hasRunwayClouds(clouds) }));
     state.mode = FLIGHT_MODE.CHARGING;
     state.holdSeconds = 0;
     state.gearFolded = false;
     state.celebrateTimer = 0.7;
   } else if (state.mode === FLIGHT_MODE.FLYING) {
+    transmitRadio(getLandingRadioLine("request"));
     state.mode = FLIGHT_MODE.LANDING;
     state.gearFolded = false;
     state.celebrateTimer = 0.5;
   } else if (state.mode === FLIGHT_MODE.LANDING) {
+    transmitRadio(getLandingRadioLine("cancel"));
     state.mode = FLIGHT_MODE.FLYING;
   } else if (state.mode === FLIGHT_MODE.CRASHED) {
     setThrottle(1);
@@ -913,6 +1531,7 @@ function updateLaunch(dt) {
   } else if (liftedOff) {
     setBadge("Fly");
     state.celebrateTimer = 1.3;
+    transmitRadio(getTakeoffAckRadioLine(), { duration: 3.8 });
   }
 
   launchFill.style.width = `${(state.holdSeconds / state.launchSeconds) * 100}%`;
@@ -986,6 +1605,7 @@ function updatePlane(dt) {
     setBadge("Land");
 
     if (plane.position.y <= 1.55 && state.speed < 12) {
+      transmitRadio(getLandingRadioLine("complete"), { duration: 4 });
       state.mode = FLIGHT_MODE.READY;
       state.speed = 0;
       state.holdSeconds = 0;
@@ -1091,6 +1711,21 @@ function updateWorld(dt, elapsed) {
     balloon.rotation.y += dt * 0.18;
   });
 
+  airport.userData.animated.forEach(({ object, speed, axis }) => {
+    object.rotation[axis] += dt * speed;
+  });
+
+  if (airport.userData.windsock) {
+    const windsock = airport.userData.windsock;
+    windsock.rotation.y = -0.22 + Math.sin(elapsed * 0.34) * 0.18;
+    windsock.userData.sock.scale.y = 1 + Math.sin(elapsed * 2.8) * 0.07;
+  }
+
+  airport.userData.pulseLights.forEach((light, index) => {
+    light.material.emissiveIntensity =
+      0.32 + Math.sin(elapsed * 2.4 + index * 0.9) * 0.14;
+  });
+
   rings.forEach((ring, index) => {
     if (ring.userData.collected) return;
     ring.rotation.z += dt * 0.9;
@@ -1119,6 +1754,27 @@ function updateWorld(dt, elapsed) {
     targetHoop.lookAt(camera.position);
     targetHoop.rotation.z += dt * 0.9;
   }
+}
+
+function updateTowerRadio(elapsed) {
+  const needsCloudHold =
+    state.mode === FLIGHT_MODE.FLYING &&
+    shouldHoldForClouds(plane.position, clouds, {
+      holdRadius: 28,
+      verticalLimit: 21,
+    });
+
+  if (needsCloudHold) {
+    if (!radioState.cloudHoldActive || elapsed - radioState.lastCloudAt > 9) {
+      transmitRadio(getCloudHoldRadioLine(), { duration: 5.2 });
+      radioState.lastCloudAt = elapsed;
+    }
+  } else if (radioState.cloudHoldActive && state.mode === FLIGHT_MODE.FLYING) {
+    transmitRadio(getCloudClearRadioLine(), { duration: 3.8 });
+  }
+
+  radioState.cloudHoldActive = needsCloudHold;
+  towerRadio?.classList.toggle("is-live", elapsed < radioState.activeUntil);
 }
 
 function formatPercent(value) {
@@ -1155,6 +1811,14 @@ function updateBatteries(dt) {
   state.planeBattery = next.planeBattery;
   state.remoteBattery = next.remoteBattery;
 
+  if (
+    isLowBatteryWarning(state, { warningThreshold: 18 }) &&
+    clock.elapsedTime - radioState.lastBatteryAt > 8
+  ) {
+    transmitRadio(getLowBatteryRadioLine(), { duration: 4.3 });
+    radioState.lastBatteryAt = clock.elapsedTime;
+  }
+
   if (state.mode === FLIGHT_MODE.CHARGING && state.planeBattery <= 1) {
     state.mode = FLIGHT_MODE.READY;
     state.holdSeconds = 0;
@@ -1166,6 +1830,7 @@ function updateBatteries(dt) {
     state.recoveryDrive = 0;
     state.planeBattery = 0;
     releaseAllDirections();
+    transmitRadio(getCrashRadioLine(), { duration: 4.3 });
   }
 }
 
@@ -1277,6 +1942,7 @@ function animate() {
   updateRemoteUI();
   updateCamera(dt);
   updateWorld(dt, elapsed);
+  updateTowerRadio(elapsed);
   updateTrail(dt);
   updateAudio(elapsed);
   renderer.render(scene, camera);
